@@ -42,6 +42,7 @@ limitations under the License.
 #include "mlir/Pass/Pass.h"  // from @llvm-project
 #include "mlir/Pass/PassManager.h"  // from @llvm-project
 #include "mlir/Target/NVVMIR.h"  // from @llvm-project
+#include "mlir/Target/ROCDLIR.h"                // from @llvm-project
 #include "mlir/Transforms/DialectConversion.h"  // from @llvm-project
 #include "tensorflow/compiler/mlir/hlo/include/mlir-hlo/Dialect/mhlo/IR/hlo_ops.h"
 #include "tensorflow/compiler/mlir/hlo/include/mlir-hlo/Dialect/mhlo/transforms/passes.h"
@@ -58,6 +59,8 @@ limitations under the License.
 #include "tensorflow/core/platform/path.h"
 #if GOOGLE_CUDA
 #include "tensorflow/stream_executor/gpu/asm_compiler.h"
+#elif TENSORFLOW_USE_ROCM
+#include "tensorflow/core/platform/rocm_rocdl_path.h"
 #endif
 
 namespace {
@@ -307,5 +310,51 @@ StatusOr<std::vector<uint8_t>> tensorflow::kernel_gen::GenerateCubinForTfCode(
 #else
   return InternalError(
       "GOOGLE_CUDA not defined. Did you specify --config=cuda ?");
+#endif
+}
+
+StatusOr<std::vector<uint8_t>> tensorflow::kernel_gen::GenerateHsacoForTfCode(
+    llvm::StringRef tf_code, std::pair<int32_t, int32_t> compute_capability,
+    llvm::ArrayRef<uint32_t> tile_sizes, llvm::ArrayRef<uint32_t> same_shape,
+    llvm::ArrayRef<uint32_t> unroll_factors) {
+  RegisterDialects();
+  mlir::MLIRContext context;
+  mlir::OwningModuleRef module = mlir::parseSourceString(tf_code, &context);
+
+  TF_RETURN_IF_ERROR(LowerTfOpToLhloWithDynamicShapes(module.get()));
+  {
+    xla::mlir_gpu::LowerLHLOToGPUOptions options;
+    options.tile_sizes = tile_sizes;
+    options.unroll_factors = unroll_factors;
+    options.collapse_parallel_loops = false;
+    TF_RETURN_IF_ERROR(xla::mlir_gpu::LowerLHLOToGPU(module.get(), options));
+  }
+
+  TF_RETURN_IF_ERROR(xla::mlir_gpu::LowerKernelBodiesToROCDL(module.get()));
+  // TF_RETURN_IF_ERROR(
+  //     PropagateStaticShapeKnowledgeToKernel(module.get(), same_shape));
+
+  mlir::OwningModuleRef kernel_module =
+      xla::mlir_gpu::ExtractKernelModule(*module).ValueOrDie();
+  auto llvmModule = mlir::translateModuleToROCDLIR(*kernel_module);
+  if (!llvmModule) {
+    return InternalError("Could not translate MLIR module to ROCDL IR");
+  }
+
+  // llvmModule->setModuleIdentifier("acme");
+  // llvmModule->setDataLayout(xla::gpu::nvptx::kDataLayout);
+
+  xla::HloModuleConfig config;
+  config.set_debug_options(xla::GetDebugOptionsFromFlags());
+
+  // TF_ASSIGN_OR_RETURN(std::string libdevice_dir, GetLibdeviceDir(config));
+  int gpu_version = 900;
+  string libdevice_dir = tensorflow::RocdlRoot();
+#if TENSORFLOW_USE_ROCM
+  return xla::gpu::amdgpu::CompileToHsaco(llvmModule.get(), gpu_version, config,
+                                          libdevice_dir);
+#else
+  return InternalError(
+      "TENSORFLOW_USE_ROCM not defined. Did you specify --config=rocm ?");
 #endif
 }
