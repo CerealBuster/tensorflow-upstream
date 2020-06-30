@@ -13,6 +13,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
+#include <fstream>
 #include <memory>
 #include <vector>
 
@@ -132,7 +133,27 @@ class MlirGeneratedTanhOp : public OpKernel {
   }
 
  protected:
+#if TENSORFLOW_USE_ROCM
+  std::vector<unsigned char> cubin_data_;
+  std::vector<unsigned char> LoadHsacoFile(const std::string filename) {
+    std::ifstream file(filename, std::ifstream::binary);
+    file.unsetf(std::ios::skipws);
+
+    std::streampos file_size;
+    file.seekg(0, std::ios::end);
+    file_size = file.tellg();
+
+    std::vector<unsigned char> hsaco_data(file_size);
+    file.seekg(0, std::ios::beg);
+    hsaco_data.insert(hsaco_data.begin(),
+                      std::istream_iterator<unsigned char>(file),
+                      std::istream_iterator<unsigned char>());
+    return hsaco_data;
+  }
+
+#else
   absl::Span<const uint8_t> cubin_data_;
+#endif
 
  private:
   std::unique_ptr<se::KernelBase> kernel_;
@@ -143,7 +164,11 @@ class MlirGeneratedTanhF16Op : public MlirGeneratedTanhOp {
  public:
   explicit MlirGeneratedTanhF16Op(OpKernelConstruction* ctx)
       : MlirGeneratedTanhOp(ctx) {
+#if TENSORFLOW_USE_ROCM
+    cubin_data_ = LoadHsacoFile(kTanhF16Kernel);
+#else
     cubin_data_ = kTanhF16Kernel;
+#endif
   }
 };
 
@@ -151,7 +176,11 @@ class MlirGeneratedTanhF32Op : public MlirGeneratedTanhOp {
  public:
   explicit MlirGeneratedTanhF32Op(OpKernelConstruction* ctx)
       : MlirGeneratedTanhOp(ctx) {
+#if TENSORFLOW_USE_ROCM
+    cubin_data_ = LoadHsacoFile(kTanhF32Kernel);
+#else
     cubin_data_ = kTanhF32Kernel;
+#endif
   }
 };
 
@@ -159,7 +188,11 @@ class MlirGeneratedTanhF64Op : public MlirGeneratedTanhOp {
  public:
   explicit MlirGeneratedTanhF64Op(OpKernelConstruction* ctx)
       : MlirGeneratedTanhOp(ctx) {
+#if TENSORFLOW_USE_ROCM
+    cubin_data_ = LoadHsacoFile(kTanhF64Kernel);
+#else
     cubin_data_ = kTanhF64Kernel;
+#endif
   }
 };
 }  // namespace

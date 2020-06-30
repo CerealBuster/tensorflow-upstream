@@ -1,6 +1,8 @@
 """Generates cubin headers for TF dialect ops."""
 
 load("@local_config_cuda//cuda:build_defs.bzl", "cuda_gpu_architectures", "if_cuda")
+load("@local_config_rocm//rocm:build_defs.bzl", "rocm_is_configured", "if_rocm")
+load("//tensorflow:tensorflow.bzl", "if_cuda_or_rocm")
 
 def if_mlir_generated_gpu_kernels_enabled(if_true, if_false = []):
     return select({
@@ -15,9 +17,12 @@ def _lookup_file(filegroup, path):
             return file
     return None
 
-CubinInfo = provider(fields = ["cubins"])
+CubinInfo = provider(fields = [
+    "cubins",
+    "hsacos",
+])
 
-def _gen_kernel_cubin_impl(ctx):
+def _gen_kernel_cubin_impl_cuda(ctx):
     name = ctx.attr.name
     tile_sizes = ctx.attr.tile_size.replace("x", ",")
     cmd_args = []
@@ -47,10 +52,40 @@ def _gen_kernel_cubin_impl(ctx):
         cubins.append(cubin)
     return [CubinInfo(cubins = cubins)]
 
+def _gen_kernel_cubin_impl_rocm(ctx):
+    name = ctx.attr.name
+    tile_sizes = ctx.attr.tile_size.replace("x", ",")
+    cmd_args = []
+    if ctx.attr.same_shape:
+        cmd_args.append("--same_shape=%s" % ctx.attr.same_shape)
+    if ctx.attr.unroll_factors:
+        cmd_args.append("--unroll_factors=%s" % ctx.attr.unroll_factors)
+
+    hsacos = []
+    for arch in ctx.attr.gpu_archs:
+        filename = "%s.%s.hsaco" % (name, arch)
+        hsaco = ctx.actions.declare_file(filename)
+        ctx.actions.run(
+            inputs = [ctx.file.mlir_op, ctx.file._tfso],
+            outputs = [hsaco],
+            executable = ctx.executable._tool,
+            arguments = cmd_args + [
+                "--tile_sizes=%s" % tile_sizes,
+                "--arch=%s" % arch.split("_")[1],
+                "--input=%s" % ctx.file.mlir_op.path,
+                "--output=%s" % hsaco.path,
+            ],
+            mnemonic = "compile",
+        )
+        hsacos.append(hsaco)
+    return [CubinInfo(hsacos = hsacos)]
+
 _gen_kernel_cubin_rule = rule(
-    implementation = _gen_kernel_cubin_impl,
     attrs = {
-        "mlir_op": attr.label(mandatory = True, allow_single_file = True),
+        "mlir_op": attr.label(
+            mandatory = True,
+            allow_single_file = True,
+        ),
         "tile_size": attr.string(mandatory = True),
         "same_shape": attr.string(),
         "unroll_factors": attr.string(),
@@ -67,9 +102,10 @@ _gen_kernel_cubin_rule = rule(
         ),
     },
     output_to_genfiles = True,
+    implementation = _gen_kernel_cubin_impl_rocm if rocm_is_configured() else _gen_kernel_cubin_impl_cuda,
 )
 
-def _gen_kernel_image_hdr_impl(ctx):
+def _gen_kernel_image_hdr_impl_cuda(ctx):
     images = []
     for cubin in ctx.attr.input[CubinInfo].cubins:
         arch = cubin.path.split(".")[-2]
@@ -101,29 +137,41 @@ def _gen_kernel_image_hdr_impl(ctx):
         mnemonic = "bin2c",
     )
 
+def _gen_kernel_image_hdr_impl_rocm(ctx):
+    hsacos = ctx.attr.input[CubinInfo].hsacos
+    ctx.actions.run_shell(
+        outputs = [ctx.outputs.out],
+        inputs = hsacos,
+        command = "echo 'const std::string %s = \"/root/tensorflow/%s\";' > %s" % (ctx.attr.symbol, hsacos[0].path, ctx.outputs.out.path),
+        mnemonic = "bin2c",
+    )
+
 _gen_kernel_image_hdr_rule = rule(
-    implementation = _gen_kernel_image_hdr_impl,
-    output_to_genfiles = True,
     attrs = {
-        "input": attr.label(mandatory = True, providers = [CubinInfo]),
+        "input": attr.label(
+            mandatory = True,
+            providers = [CubinInfo],
+        ),
         "out": attr.output(mandatory = True),
         "symbol": attr.string(mandatory = True),
         "_cuda_root": attr.label(
             default = Label("@local_config_cuda//cuda:cuda_root"),
         ),
     },
+    output_to_genfiles = True,
+    implementation = _gen_kernel_image_hdr_impl_rocm if rocm_is_configured() else _gen_kernel_image_hdr_impl_cuda,
 )
 
 def _gen_kernel_image_hdr(name, mlir_op, tile_size, same_shape = None, unroll_factors = None):
     """Generates a C header with fatbin data from a Tensorflow op."""
-    if cuda_gpu_architectures():
+    if cuda_gpu_architectures() or rocm_is_configured():
         _gen_kernel_cubin_rule(
             name = name + "_cubin",
             mlir_op = mlir_op,
             tile_size = tile_size,
             same_shape = same_shape,
             unroll_factors = unroll_factors,
-            gpu_archs = cuda_gpu_architectures(),
+            gpu_archs = ["gfx_900"] if rocm_is_configured() else cuda_gpu_architectures(),
         )
         _gen_kernel_image_hdr_rule(
             name = name,
@@ -144,13 +192,16 @@ def _gen_mlir_op_impl(ctx):
     )
 
 _gen_mlir_op_rule = rule(
-    implementation = _gen_mlir_op_impl,
-    output_to_genfiles = True,
     attrs = {
-        "template": attr.label(mandatory = True, allow_single_file = True),
+        "template": attr.label(
+            mandatory = True,
+            allow_single_file = True,
+        ),
         "type": attr.string(mandatory = True),
         "out": attr.output(mandatory = True),
     },
+    output_to_genfiles = True,
+    implementation = _gen_mlir_op_impl,
 )
 
 def _gen_mlir_op(name, type):
@@ -173,7 +224,7 @@ def gen_kernel_library(name, types, tile_size, tags = [], same_shape = None, unr
       same_shape: The information about which shapes are the same, e.g. "0,1".
     """
 
-    if cuda_gpu_architectures():
+    if cuda_gpu_architectures() or rocm_is_configured():
         for type in types:
             _gen_mlir_op(
                 name = name,
@@ -189,6 +240,6 @@ def gen_kernel_library(name, types, tile_size, tags = [], same_shape = None, unr
 
     native.cc_library(
         name = name + "_kernels",
-        hdrs = if_cuda(if_true = [":{name}_{type}_kernel".format(name = name, type = type) for type in types]),
+        hdrs = if_cuda_or_rocm(if_true = [":{name}_{type}_kernel".format(name = name, type = type) for type in types]),
         tags = tags,
     )
