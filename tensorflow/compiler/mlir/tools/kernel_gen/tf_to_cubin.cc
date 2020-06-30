@@ -64,8 +64,13 @@ int main(int argc, char** argv) {
     return 1;
   }
 
+#if TENSORFLOW_USE_ROCM
+  auto cubin = tensorflow::kernel_gen::GenerateHsacoForTfCode(
+      tf_code, compute_capability, tile_sizes, same_shape, unroll_factors);
+#else
   auto cubin = tensorflow::kernel_gen::GenerateCubinForTfCode(
       tf_code, compute_capability, tile_sizes, same_shape, unroll_factors);
+#endif
 
   if (!cubin.ok()) {
     LOG(ERROR) << cubin.status();
