@@ -13,12 +13,13 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-//===- cubin_creator.cc -----------------------------------------*- C++ -*-===//
+//===- gpu_binary_creator.cc ------------------------------------*- C++ -*-===//
 //
-// This file implements the function to compile a TF kernel function to a cubin.
+// This file implements the function to compile a TF kernel function
+// to gpu binary (hsaco for AMD, cubin for NVIDIA)
 //
 //===----------------------------------------------------------------------===//
-#include "tensorflow/compiler/mlir/tools/kernel_gen/cubin_creator.h"
+#include "tensorflow/compiler/mlir/tools/kernel_gen/gpu_binary_creator.h"
 
 #include <string>
 #include <utility>
@@ -30,18 +31,18 @@ limitations under the License.
 #include "llvm/ADT/None.h"
 #include "llvm/ADT/StringRef.h"
 #include "llvm/Support/Debug.h"
-#include "mlir/Dialect/GPU/GPUDialect.h"  // from @llvm-project
-#include "mlir/Dialect/LLVMIR/LLVMDialect.h"  // from @llvm-project
-#include "mlir/Dialect/StandardOps/IR/Ops.h"  // from @llvm-project
-#include "mlir/IR/Dialect.h"  // from @llvm-project
-#include "mlir/IR/Function.h"  // from @llvm-project
-#include "mlir/IR/Operation.h"  // from @llvm-project
-#include "mlir/IR/StandardTypes.h"  // from @llvm-project
-#include "mlir/IR/Value.h"  // from @llvm-project
-#include "mlir/Parser.h"  // from @llvm-project
-#include "mlir/Pass/Pass.h"  // from @llvm-project
-#include "mlir/Pass/PassManager.h"  // from @llvm-project
-#include "mlir/Target/NVVMIR.h"  // from @llvm-project
+#include "mlir/Dialect/GPU/GPUDialect.h"        // from @llvm-project
+#include "mlir/Dialect/LLVMIR/LLVMDialect.h"    // from @llvm-project
+#include "mlir/Dialect/StandardOps/IR/Ops.h"    // from @llvm-project
+#include "mlir/IR/Dialect.h"                    // from @llvm-project
+#include "mlir/IR/Function.h"                   // from @llvm-project
+#include "mlir/IR/Operation.h"                  // from @llvm-project
+#include "mlir/IR/StandardTypes.h"              // from @llvm-project
+#include "mlir/IR/Value.h"                      // from @llvm-project
+#include "mlir/Parser.h"                        // from @llvm-project
+#include "mlir/Pass/Pass.h"                     // from @llvm-project
+#include "mlir/Pass/PassManager.h"              // from @llvm-project
+#include "mlir/Target/NVVMIR.h"                 // from @llvm-project
 #include "mlir/Target/ROCDLIR.h"                // from @llvm-project
 #include "mlir/Transforms/DialectConversion.h"  // from @llvm-project
 #include "tensorflow/compiler/mlir/hlo/include/mlir-hlo/Dialect/mhlo/IR/hlo_ops.h"
